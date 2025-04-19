@@ -2,6 +2,8 @@
 
 **Stream Creality K1 webcam to Twitch, post Klipper status to chat, and update stream title**
 
+![twitch](doc/twitch.png)
+
 This script runs on your Creality K1 printer (as root) to:
 
 1. Stream the webcam feed to Twitch via FFmpeg.  
