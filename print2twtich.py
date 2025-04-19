@@ -148,66 +148,99 @@ def extract_pin_value(pin):
 def get_klipper_status(url):
     """
     Query the Klipper/Moonraker API for detailed printer status.
+    Handles completed prints and missing file path gracefully.
 
     Args:
-        url (str): Moonraker API endpoint, e.g. 'http://<printer-ip>:7125/printer/objects/query'.
+        url (str): Moonraker API endpoint.
     Returns:
         str: Formatted status line for chat and title.
     """
     try:
         j = requests.get(url, timeout=3).json()["result"]["status"]
-        # Extract file and state
+        # File and state
         ps = j.get("print_stats", {})
         vsd = j.get("virtual_sdcard", {})
-        fn = vsd.get("file_path", "<none>").split("/")[-1]
-        st = ps.get("state", "unknown")
+        file_path = vsd.get("file_path") or "<none>"
+        filename = file_path.split("/")[-1]
+        state = ps.get("state", "unknown")
+
         # Progress and timing
         prog = j.get("display_status", {}).get("progress", 0.0)
-        pct = int(prog * 100)
-        dur = ps.get("print_duration", 0.0)
-        h, rem = divmod(dur, 3600)
-        m = rem // 60
-        elapsed = f"{int(h)}h{int(m):02d}m" if h else f"{int(m)}m"
+        progress_pct = int(prog * 100)
+        print_sec = ps.get("print_duration", 0.0)
+        hrs, rem = divmod(print_sec, 3600)
+        mins = rem // 60
+        elapsed = f"{int(hrs)}h{int(mins):02d}m" if hrs else f"{int(mins)}m"
         eta = "??"
         if prog > 0:
-            total = dur / prog
+            total = print_sec / prog
             th, trem = divmod(total, 3600)
             tm = trem // 60
             eta = f"{int(th)}h{int(tm):02d}m" if th else f"{int(tm)}m"
+
         # Temperatures
-        ext = j.get("extruder", {})
+        extr = j.get("extruder", {})
         bed = j.get("heater_bed", {})
-        et, ett = ext.get("temperature", "?"), ext.get("target", "?")
-        bt, btt = bed.get("temperature", "?"), bed.get("target", "?")
-        es = " (heating)" if isinstance(et, (int,float)) and isinstance(ett, (int,float)) and et < ett - 1 else \
-             " (cooling)" if isinstance(et, (int,float)) and isinstance(ett, (int,float)) and et > ett + 1 else ""
-        bs = " (heating)" if isinstance(bt, (int,float)) and isinstance(btt, (int,float)) and bt < btt - 1 else \
-             " (cooling)" if isinstance(bt, (int,float)) and isinstance(btt, (int,float)) and bt > btt + 1 else ""
-        temps = f"🔥 Hotend:{et}/{ett}°C{es} 🛏️ Bed:{bt}/{btt}°C{bs}"
-        # Sensor temps
-        mcu = get_key(j, "temperature_sensor mcu_temp").get("temperature", "?")
-        amb = get_key(j, "temperature_sensor chamber_temp").get("temperature", "?")
-        sensors = f"💻 MCU:{mcu}°C 🌡️ Ambient:{amb}°C"
+        et = extr.get("temperature", "?")
+        ett = extr.get("target", "?")
+        bt = bed.get("temperature", "?")
+        btt = bed.get("target", "?")
+        extr_state = ""
+        if isinstance(et, (int, float)) and isinstance(ett, (int, float)):
+            if et < ett - 1:
+                extr_state = " (heating)"
+            elif et > ett + 1:
+                extr_state = " (cooling)"
+        bed_state = ""
+        if isinstance(bt, (int, float)) and isinstance(btt, (int, float)):
+            if bt < btt - 1:
+                bed_state = " (heating)"
+            elif bt > btt + 1:
+                bed_state = " (cooling)"
+        temps = f"🔥 Hotend: {et}/{ett}°C{extr_state}  🛏️ Bed: {bt}/{btt}°C{bed_state}"
+
+        # Sensors
+        mcu_temp = get_key(j, "temperature_sensor mcu_temp").get("temperature", "?")
+        ambient_temp = get_key(j, "temperature_sensor chamber_temp").get("temperature", "?")
+        sensors = f"💻 MCU: {mcu_temp}°C  🌡️ Ambient: {ambient_temp}°C"
+
         # Fans
-        hf = get_key(j, "heater_fan hotend_fan").get("speed", None)
-        hfs = "On" if hf == 1 else "Off" if hf == 0 else "N/A"
-        f0 = extract_pin_value(get_key(j, "output_pin fan0"))
-        f1 = extract_pin_value(get_key(j, "output_pin fan1"))
-        f2 = extract_pin_value(get_key(j, "output_pin fan2"))
-        fans = f"❄️ Hotend:{hfs} | 🆒 Case:f0 {f0},f1 {f1},f2 {f2}"
+        hf_speed = get_key(j, "heater_fan hotend_fan").get("speed")
+        hotend_fan = "On" if hf_speed == 1 else "Off" if hf_speed == 0 else "N/A"
+        fan0 = extract_pin_value(get_key(j, "output_pin fan0"))
+        fan1 = extract_pin_value(get_key(j, "output_pin fan1"))
+        fan2 = extract_pin_value(get_key(j, "output_pin fan2"))
+        fans = f"❄️ Hotend fan: {hotend_fan} | 🆒 Case fans: fan0 {fan0}, fan1 {fan1}, fan2 {fan2}"
+
         # Position
-        pos = j.get("toolhead", {}).get("position", [None] * 4)
-        pos_s = f"📍 X{pos[0]:.0f} Y{pos[1]:.0f} Z{pos[2]:.2f}" if None not in pos[:3] else "📍 N/A"
-        # Layer and speed
-        ly, lc = vsd.get("layer"), vsd.get("layer_count")
-        layer = f"🧱 Layer:{ly}/{lc}" if ly is not None and lc else "🧱 Layer:N/A"
-        spf = j.get("gcode_move", {}).get("speed_factor", 1.0)
-        sp = int(float(spf) * 100)
-        # Combine
-        return (
-            f"📁{fn}|🖨️{st}|📊{pct}%|⏱️{elapsed}/{eta}|"
-            f"{temps}|{sensors}|{fans}|{pos_s}|{layer}|🏎️{sp}%"
+        pos = j.get("toolhead", {}).get("position", [None, None, None, None])
+        if None not in pos[:3]:
+            pos_str = f"📍 X{pos[0]:.0f} Y{pos[1]:.0f} Z{pos[2]:.2f}"
+        else:
+            pos_str = "📍 N/A"
+
+        # Layer
+        layer = vsd.get("layer")
+        layer_count = vsd.get("layer_count")
+        layer_str = f"🧱 Layer: {layer}/{layer_count}" if layer is not None and layer_count else "🧱 Layer: N/A"
+
+        # Speed
+        speed_factor = j.get("gcode_move", {}).get("speed_factor", 1.0)
+        speed_pct = int(speed_factor * 100)
+
+        status_message = (
+            f"📁 File: {filename} | "
+            f"🖨️ State: {state} | "
+            f"📊 Progress: {progress_pct}% | "
+            f"⏱️ Time: {elapsed}/{eta} | "
+            f"{temps} | "
+            f"{sensors} | "
+            f"{fans} | "
+            f"{pos_str} | "
+            f"{layer_str} | "
+            f"🏎️ Speed: {speed_pct}%"
         )
+        return status_message
     except Exception as e:
         return f"⚠️ Klipper API error: {e}"
 
@@ -223,14 +256,14 @@ def make_creative_title(status):
     """
     parts = status.split("|")
     if len(parts) < 5:
-        return ""  # invalid format
-    file_p = parts[0].lstrip("📁")
-    st_p   = parts[1].lstrip("🖨️")
-    pr_p   = parts[2].lstrip("📊")
-    el_p   = parts[3].split("/")[0].lstrip("⏱️")
-    tp_p   = parts[4]
+        return ""
+    file_part = parts[0].split(":", 1)[-1].strip()
+    state_part = parts[1].split(":", 1)[-1].strip()
+    progress_part = parts[2].split(":", 1)[-1].strip()
+    elapsed = parts[3].split("|", 1)[0].split(":", 1)[-1].split("/")[0].strip()
+    temps_part = parts[4]
     title = (
-        f"🖨️{file_p} | 🚀{pr_p} done | ⏰{el_p} elapsed | {tp_p} | ✅{st_p}"
+        f"🖨️{file_part} | 🚀{progress_part} | ⏰{elapsed} | {temps_part} | ✅{state_part}"
     )
     return title[:137] + "..." if len(title) > 140 else title
 
@@ -247,8 +280,7 @@ def update_title(cfg, broadcaster_id, title):
     url = f"https://api.twitch.tv/helix/channels?broadcaster_id={broadcaster_id}"
     headers = {
         "Client-ID": cfg["client_id"],
-        "Authorization": f"Bearer {cfg['access_token']}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {cfg['access_token']}"
     }
     requests.patch(url, headers=headers, json={"title": title})
 
@@ -283,8 +315,9 @@ def chat_worker(cfg):
     interval = cfg.get("chat_interval", cfg.get("update_interval", 60))
     while True:
         try:
-            st = get_klipper_status(cfg["klipper_api_url"])
-            sock.send(f"PRIVMSG #{chan} :{st}\r\n".encode())
+            msg = get_klipper_status(cfg["klipper_api_url"])
+            sock.send(f"PRIVMSG #{chan} :{msg}\r\n".encode())
+            print(f"[chat_worker] Sent to chat: {msg}")
         except Exception as e:
             print(f"[chat_worker] Error: {e}, retrying in 5s")
             time.sleep(5)
@@ -304,11 +337,11 @@ def title_worker(cfg):
     interval = cfg.get("title_interval", cfg.get("update_interval", 60))
     while True:
         try:
-            st = get_klipper_status(cfg["klipper_api_url"])
-            new_title = make_creative_title(st)
-            if new_title:
-                update_title(cfg, broadcaster_id, new_title)
-                print(f"[title_worker] Updated title: {new_title}")
+            msg = get_klipper_status(cfg["klipper_api_url"])
+            title = make_creative_title(msg)
+            if title:
+                update_title(cfg, broadcaster_id, title)
+                print(f"[title_worker] Updated title: {title}")
         except Exception as e:
             print(f"[title_worker] Error: {e}, retrying in 5s")
             time.sleep(5)
@@ -325,15 +358,14 @@ def ffmpeg_worker(cfg):
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "info",
-        "-stats_period", "30",
-        "-f", ff.get("format", "v4l2"),
+        "-f", cfg["ffmpeg"].get("format", "v4l2"),
         "-fflags", "+genpts",
-        "-video_size", ff.get("video_size", "640x480"),
-        "-input_format", ff.get("input_format", "h264"),
-        "-i", ff["device"],
+        "-video_size", cfg["ffmpeg"].get("video_size", "640x480"),
+        "-input_format", cfg["ffmpeg"].get("input_format", "h264"),
+        "-i", cfg["ffmpeg"]["device"],
         "-c", "copy",
         "-f", "flv",
-        f"rtmp://live.twitch.tv/app/{ff['stream_key']}"
+        f"rtmp://live.twitch.tv/app/{cfg['ffmpeg']['stream_key']}"
     ]
     subprocess.run(cmd, check=True)
 
@@ -351,6 +383,7 @@ def main():
         print("Interrupted, exiting.")
     except subprocess.CalledProcessError as e:
         print("FFmpeg error:", e)
+
 
 if __name__ == "__main__":
     main()
